@@ -21,23 +21,21 @@ install.packages(c("ggplot2", "dplyr", "tidyr",
 ### How to Reproduce
 1. Clone the repository
 2. Install the required R packages listed above
-3. Render the report:
+3. Navigate to the repository root and render the report:
 ```bash
-cd A1
 quarto render report.qmd
 ```
 4. The output `report.pdf` will be generated in the same directory
 
 ### Project Structure
 ```
-A1/
-  report.qmd              Quarto report with all analysis code
-  report.pdf              Final PDF report (max 15 pages)
-  README.md               This file
-  src/
-    utils.R               Helper functions (densities, likelihoods, EM, bootstrap)
-  plots/                  Generated figures
-  1_snow_particles.csv    Raw data
+report.qmd              Quarto report with all analysis code
+report.pdf              Final PDF report (max 15 pages)
+README.md               This file
+src/
+  utils.R                Helper functions (densities, likelihoods, EM, bootstrap)
+report_files/           Generated figures
+1_snow_particles.csv     Raw data
 ```
 
 ### Data

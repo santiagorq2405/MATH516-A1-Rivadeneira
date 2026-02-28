@@ -26,7 +26,6 @@ execute:
 ---
 
 ```{r setup}
-.libPaths(c("C:/Users/Santiago/AppData/Local/R/win-library/4.5", .libPaths()))
 source("src/utils.R")
 
 library(ggplot2)
