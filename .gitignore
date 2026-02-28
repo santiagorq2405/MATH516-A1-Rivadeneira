@@ -1,0 +1,14 @@
+# R environment (machine-specific paths)
+.Renviron
+.Rhistory
+.RData
+.Rproj.user
+
+# Quarto/knitr cache
+*_cache/
+report_cache/
+
+# Temporary files
+*.log
+.DS_Store
+Thumbs.db

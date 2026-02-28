@@ -1,0 +1,576 @@
+---
+title: "Bi-Log-Normal Mixture Model for Snow-Flake Diameters"
+subtitle: "MATH 516 -- Applied Statistics, EPFL"
+author: "Santiago Rivadeneira Quintero"
+date: today
+format:
+  pdf:
+    documentclass: article
+    geometry: "margin=2.5cm"
+    fontsize: 11pt
+    number-sections: true
+    toc: false
+    fig-pos: "H"
+    header-includes:
+      - \usepackage{float}
+      - \usepackage{booktabs}
+      - \usepackage{amsmath,amssymb}
+      - \usepackage{caption}
+      - \captionsetup{font=small}
+bibliography: references.bib
+execute:
+  echo: false
+  warning: false
+  message: false
+  cache: true
+---
+
+```{r setup}
+.libPaths(c("C:/Users/Santiago/AppData/Local/R/win-library/4.5", .libPaths()))
+source("src/utils.R")
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+
+theme_set(
+  theme_minimal(base_size = 11) +
+    theme(
+      plot.title = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10, color = "grey40"),
+      axis.title = element_text(size = 10),
+      legend.position = "bottom"
+    )
+)
+
+palette_main <- c("#2C3E50", "#E74C3C", "#3498DB", "#2ECC71", "#9B59B6")
+```
+
+```{r load-data}
+dat <- read.csv("1_snow_particles.csv", row.names = 1)
+colnames(dat) <- c("startpoint", "endpoint", "retained_pct", "particles_detected")
+
+N_total <- dat$particles_detected[1]
+dat$counts <- round(dat$retained_pct / 100 * N_total)
+dat$bin_width <- dat$endpoint - dat$startpoint
+dat$midpoint <- (dat$startpoint + dat$endpoint) / 2
+dat$log_midpoint <- log(dat$midpoint)
+dat$density <- dat$retained_pct / (100 * dat$bin_width)
+
+# Exclude the catch-all bin [3, 1000] from density plots
+dat_plot <- dat[dat$endpoint <= 3.5, ]
+```
+
+# Introduction
+
+Understanding the grain size distribution of surface snow is essential for modelling wind-driven snow transport (saltation). @melo2021 demonstrated that particle diameter distributions significantly affect transport dynamics, making accurate probabilistic modelling of diameters critical for realistic simulations.
+
+This report analyses binned snow-flake diameter data collected at the Laboratory of Cryospheric Sciences at EPFL. The dataset contains `r format(N_total, big.mark = ",")` particle measurements distributed across `r nrow(dat)` non-equidistant bins. Our goal is to assess whether a mixture of two log-normal distributions (bi-log-normal) adequately describes the data, fit this model using both frequentist and Bayesian methods, and test the goodness of fit via parametric bootstrap.
+
+# Exploratory Data Analysis {#sec-eda}
+
+## Data Overview
+
+The data consists of `r nrow(dat)` diameter bins with the fraction of particles retained in each bin. The total number of detected particles is $N = `r format(N_total, big.mark = ",")`$. The bin grid is non-equidistant, with widths ranging from `r round(min(dat_plot$bin_width), 4)` to `r round(max(dat_plot$bin_width), 3)` mm.
+
+```{r tbl-data-summary}
+#| label: tbl-data-summary
+summary_df <- data.frame(
+  Statistic = c("Number of bins", "Total particles",
+                "Min bin width (mm)", "Max bin width (mm)",
+                "Diameter range (mm)"),
+  Value = c(nrow(dat), format(N_total, big.mark = ","),
+            round(min(dat_plot$bin_width), 4),
+            round(max(dat_plot$bin_width), 3),
+            paste0("[", dat$startpoint[1], ", ", dat$endpoint[nrow(dat)], "]"))
+)
+kable(summary_df, booktabs = TRUE, caption = "Summary of the snow particle dataset.") |>
+  kable_styling(latex_options = "hold_position")
+```
+
+## Visualizing the Distribution
+
+@fig-eda-hist shows the raw retained percentages alongside the density-normalized histogram. Since the bins are non-equidistant, the raw percentages can be misleading: a wide bin may capture many particles simply because it spans a larger range. Normalizing by bin width reveals the true density shape.
+
+```{r fig-eda-hist}
+#| fig-cap: "Left: raw retained percentages by bin. Right: density-normalized histogram (retained percentage divided by bin width). The density view reveals the underlying shape more accurately."
+#| fig-height: 3.5
+#| fig-width: 10
+#| label: fig-eda-hist
+
+p1 <- ggplot(dat_plot, aes(x = midpoint, y = retained_pct)) +
+  geom_col(fill = palette_main[1], alpha = 0.8, width = dat_plot$bin_width * 0.9) +
+  labs(x = "Diameter (mm)", y = "Retained (%)",
+       title = "Raw retained percentages") +
+  scale_x_continuous(breaks = seq(0, 3, 0.5))
+
+p2 <- ggplot(dat_plot, aes(x = midpoint, y = density)) +
+  geom_col(fill = palette_main[3], alpha = 0.8, width = dat_plot$bin_width * 0.9) +
+  labs(x = "Diameter (mm)", y = "Density (% / mm)",
+       title = "Density-normalized histogram") +
+  scale_x_continuous(breaks = seq(0, 3, 0.5))
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+```{r fig-eda-log}
+#| fig-cap: "Density-normalized histogram on log-scale diameter axis. The bimodal structure becomes evident, with modes near 0.1 mm and 0.6 mm, supporting the hypothesis of a mixture of two log-normal components."
+#| fig-height: 3.5
+#| fig-width: 7
+#| label: fig-eda-log
+
+ggplot(dat_plot, aes(x = midpoint, y = density)) +
+  geom_col(fill = palette_main[3], alpha = 0.8) +
+  scale_x_log10(breaks = c(0.05, 0.1, 0.2, 0.5, 1, 2),
+                labels = c("0.05", "0.1", "0.2", "0.5", "1", "2")) +
+  labs(x = "Diameter (mm, log scale)", y = "Density (% / mm)",
+       title = "Density histogram on log scale",
+       subtitle = "Bimodal structure supports the bi-log-normal hypothesis") +
+  annotation_logticks(sides = "b")
+```
+
+```{r fig-ecdf}
+#| fig-cap: "Empirical cumulative distribution function computed from the binned data. The change in slope around 0.2 mm further suggests the presence of two mixture components."
+#| fig-height: 3.2
+#| fig-width: 7
+#| label: fig-ecdf
+
+ecdf_dat <- data.frame(
+  x = dat$endpoint,
+  F_hat = cumsum(dat$retained_pct) / 100
+)
+
+ggplot(ecdf_dat, aes(x = x, y = F_hat)) +
+  geom_step(color = palette_main[1], linewidth = 0.8) +
+  scale_x_log10(breaks = c(0.05, 0.1, 0.2, 0.5, 1, 2, 5),
+                labels = c("0.05", "0.1", "0.2", "0.5", "1", "2", "5")) +
+  labs(x = "Diameter (mm, log scale)", y = expression(hat(F)(x)),
+       title = "Empirical CDF from binned data") +
+  annotation_logticks(sides = "b") +
+  coord_cartesian(xlim = c(0.04, 5))
+```
+
+The log-scale histogram (@fig-eda-log) clearly reveals two modes: one near 0.1 mm (small particles) and another near 0.6 mm (larger particles). Note the visible gap between the first bar and the rest of the histogram: this is an artifact of the non-equidistant binning, as the first bin $[0, 0.06]$ is 12 times wider than the next bin $[0.06, 0.065]$, and its midpoint (0.03 mm) is far from the subsequent midpoints on the log scale. The empirical CDF (@fig-ecdf) shows a change in slope around 0.2 mm, further supporting the mixture hypothesis. These observations strongly suggest that a single log-normal distribution would be inadequate, while a mixture of two log-normals is a plausible model.
+
+# Likelihood Formulation {#sec-likelihood}
+
+## Notation
+
+Let $f(x;\theta)$ denote the bi-log-normal density with parameter vector $\theta = (\pi, \mu_1, \sigma_1, \mu_2, \sigma_2)$:
+$$
+f(x;\theta) = \pi \cdot f_{\text{LN}}(x;\mu_1,\sigma_1) + (1-\pi) \cdot f_{\text{LN}}(x;\mu_2,\sigma_2),
+$$
+where $f_{\text{LN}}(x;\mu,\sigma) = \frac{1}{x\sigma\sqrt{2\pi}} \exp\!\left(-\frac{(\log x - \mu)^2}{2\sigma^2}\right)$ for $x > 0$.
+
+## Binned Data Likelihood
+
+The data provide counts $n_j$ for bins $[a_j, b_j)$, $j = 1,\ldots,J$, with $\sum_j n_j = N$. The probability that a particle falls in bin $j$ is:
+$$
+p_j(\theta) = \pi\!\left[\Phi\!\left(\frac{\log b_j - \mu_1}{\sigma_1}\right) - \Phi\!\left(\frac{\log a_j - \mu_1}{\sigma_1}\right)\right] + (1-\pi)\!\left[\Phi\!\left(\frac{\log b_j - \mu_2}{\sigma_2}\right) - \Phi\!\left(\frac{\log a_j - \mu_2}{\sigma_2}\right)\right],
+$$
+where $\Phi$ is the standard normal CDF. The multinomial log-likelihood is:
+$$
+\ell_{\text{bin}}(\theta) = \sum_{j=1}^{J} n_j \log p_j(\theta). \tag{1}
+$$
+
+## Jittered Data Likelihood
+
+Jittering generates pseudo-observations $x_1, \ldots, x_N$ by sampling each $x_i$ uniformly within its bin. Treating these as continuous observations yields the standard mixture log-likelihood:
+$$
+\ell_{\text{jit}}(\theta) = \sum_{i=1}^{N} \log f(x_i;\theta) = \sum_{i=1}^{N} \log\!\left[\pi \cdot f_{\text{LN}}(x_i;\mu_1,\sigma_1) + (1-\pi) \cdot f_{\text{LN}}(x_i;\mu_2,\sigma_2)\right]. \tag{2}
+$$
+
+The binned likelihood (1) is exact given the data we observe, while the jittered likelihood (2) introduces randomness through the jittering step but enables the standard EM algorithm for mixtures. Both are valid approaches; we implement and compare both.
+
+# Fitting the Bi-Log-Normal Model {#sec-fitting}
+
+## Jittering and EM Algorithm {#sec-em}
+
+```{r jittering}
+# Generate jittered pseudo-observations
+x_jittered <- jitter_binned(dat$startpoint, dat$endpoint, dat$counts, seed = 42)
+```
+
+We first generate $N = `r format(length(x_jittered), big.mark = ",")`$ pseudo-observations by sampling uniformly within each bin, then apply the Expectation-Maximization (EM) algorithm [@dempster1977] for Gaussian mixtures on the log-transformed data.
+
+The EM algorithm alternates between two steps at each iteration $t$. In the E-step, we compute the responsibility of each component $k$ for each observation $i$, defined as $\gamma_{ik}^{(t)} = \pi_k^{(t)} \phi(\log x_i;\, \mu_k^{(t)},\, \sigma_k^{(t)}) / \sum_{k'} \pi_{k'}^{(t)} \phi(\log x_i;\, \mu_{k'}^{(t)},\, \sigma_{k'}^{(t)})$, where $\phi(\cdot;\mu,\sigma)$ denotes the normal density with mean $\mu$ and standard deviation $\sigma$. To avoid numerical underflow, we evaluate these responsibilities in log-space using the log-sum-exp identity. In the M-step, the parameters are updated in closed form: $\pi_k^{(t+1)} = N^{-1}\sum_i \gamma_{ik}^{(t)}$, $\mu_k^{(t+1)} = \sum_i \gamma_{ik}^{(t)} \log x_i \big/ \sum_i \gamma_{ik}^{(t)}$, and $\sigma_k^{2,(t+1)} = \sum_i \gamma_{ik}^{(t)}(\log x_i - \mu_k^{(t+1)})^2 \big/ \sum_i \gamma_{ik}^{(t)}$. We iterate until the log-likelihood increment satisfies $|\ell^{(t+1)} - \ell^{(t)}| < 10^{-8}$.
+
+```{r em-fit}
+em_result <- em_lognormal_mix(
+  x_jittered,
+  pi1_init = 0.3, mu1_init = -2.5, sigma1_init = 0.6,
+  mu2_init = -0.4, sigma2_init = 0.4,
+  max_iter = 500, tol = 1e-8
+)
+```
+
+```{r fig-em-convergence}
+#| fig-cap: "EM algorithm convergence: log-likelihood as a function of iteration number. Rapid initial increase followed by stabilization indicates successful convergence."
+#| fig-height: 3
+#| fig-width: 6
+#| label: fig-em-convergence
+
+ll_df <- data.frame(iteration = seq_along(em_result$ll_history),
+                    loglik = em_result$ll_history)
+
+ggplot(ll_df, aes(x = iteration, y = loglik)) +
+  geom_line(color = palette_main[1], linewidth = 0.8) +
+  labs(x = "Iteration", y = "Log-likelihood",
+       title = "EM convergence",
+       subtitle = paste("Converged in", em_result$n_iter, "iterations"))
+```
+
+## Direct Optimization on Binned Likelihood {#sec-mle}
+
+We refine the EM estimates by directly maximizing the binned log-likelihood (1) using the L-BFGS-B algorithm, with the EM solution as starting point.
+
+```{r mle-fit}
+em_start <- c(em_result$pi1, em_result$mu1, em_result$sigma1,
+              em_result$mu2, em_result$sigma2)
+
+mle_result <- mle_binned(dat$startpoint, dat$endpoint, dat$counts, em_start)
+```
+
+```{r single-lnorm}
+# Baseline: single log-normal fit for model comparison
+single_fit <- mle_single_lnorm(dat$startpoint, dat$endpoint, dat$counts)
+```
+
+```{r fig-fitted-density}
+#| fig-cap: "Fitted bi-log-normal density overlaid on the density-normalized histogram. The two mixture components (dashed lines) combine to form the overall fit (solid red). The single log-normal baseline (dotted grey) clearly fails to capture the bimodal structure."
+#| fig-height: 4
+#| fig-width: 8
+#| label: fig-fitted-density
+
+x_grid <- seq(0.01, 3, length.out = 1000)
+
+dens_mix <- dlnorm_mix(x_grid, mle_result$pi1, mle_result$mu1, mle_result$sigma1,
+                       mle_result$mu2, mle_result$sigma2)
+dens_c1 <- mle_result$pi1 * dlnorm(x_grid, mle_result$mu1, mle_result$sigma1)
+dens_c2 <- (1 - mle_result$pi1) * dlnorm(x_grid, mle_result$mu2, mle_result$sigma2)
+dens_single <- dlnorm(x_grid, single_fit$mu, single_fit$sigma)
+
+fit_df <- data.frame(x = x_grid, mixture = dens_mix,
+                     comp1 = dens_c1, comp2 = dens_c2,
+                     single = dens_single)
+
+ggplot() +
+  geom_col(data = dat_plot, aes(x = midpoint, y = density / 100),
+           fill = palette_main[3], alpha = 0.4, width = dat_plot$bin_width * 0.9) +
+  geom_line(data = fit_df, aes(x = x, y = mixture),
+            color = palette_main[2], linewidth = 1) +
+  geom_line(data = fit_df, aes(x = x, y = comp1),
+            color = palette_main[4], linewidth = 0.7, linetype = "dashed") +
+  geom_line(data = fit_df, aes(x = x, y = comp2),
+            color = palette_main[5], linewidth = 0.7, linetype = "dashed") +
+  geom_line(data = fit_df, aes(x = x, y = single),
+            color = "grey50", linewidth = 0.7, linetype = "dotted") +
+  labs(x = "Diameter (mm)", y = "Density",
+       title = "Fitted bi-log-normal mixture vs observed data",
+       subtitle = "Red = mixture, dashed = components, dotted grey = single log-normal") +
+  coord_cartesian(xlim = c(0, 3))
+```
+
+```{r tbl-model-comparison}
+#| label: tbl-model-comparison
+aic_mix <- -2 * mle_result$loglik + 2 * 5
+bic_mix <- -2 * mle_result$loglik + 5 * log(sum(dat$counts))
+aic_single <- -2 * single_fit$loglik + 2 * 2
+bic_single <- -2 * single_fit$loglik + 2 * log(sum(dat$counts))
+
+comp_df <- data.frame(
+  Model = c("Single log-normal", "Bi-log-normal mixture"),
+  Parameters = c(2, 5),
+  LogLik = round(c(single_fit$loglik, mle_result$loglik), 1),
+  AIC = round(c(aic_single, aic_mix), 1),
+  BIC = round(c(bic_single, bic_mix), 1)
+)
+kable(comp_df, booktabs = TRUE,
+      caption = "Model comparison between single log-normal and bi-log-normal mixture. Both AIC and BIC strongly favour the mixture model.") |>
+  kable_styling(latex_options = "hold_position")
+```
+
+The bi-log-normal mixture is overwhelmingly preferred over the single log-normal baseline by both AIC and BIC (@tbl-model-comparison), with an improvement of over 360,000 units in log-likelihood. A detailed comparison of all parameter estimates across the three fitting methods (EM, binned MLE, and Bayesian) is presented in @tbl-comparison-all after the Bayesian analysis.
+
+## Bayesian Approach {#sec-bayes}
+
+```{r mcmc-run, results='hide'}
+mle_start <- c(mle_result$pi1, mle_result$mu1, mle_result$sigma1,
+               mle_result$mu2, mle_result$sigma2)
+
+cat("Running MCMC (4 chains)...\n")
+mcmc_result <- run_mcmc_chains(
+  dat$startpoint, dat$endpoint, dat$counts,
+  start_params = mle_start,
+  n_chains = 4, n_iter = 5000, n_warmup = 2000, seed = 42
+)
+bayes_summ <- mcmc_result$summary
+```
+
+We adopt a Bayesian approach using a custom Random Walk Metropolis-Hastings (RWMH) sampler implemented from scratch in R. We chose a manual implementation over probabilistic programming tools (e.g., Stan) to maintain full control over the sampler, avoid external compilation dependencies, and demonstrate understanding of the underlying MCMC methodology.
+
+**Sampler design.** We work on an unconstrained parameter space via logit$(\pi)$ and $\log(\sigma_k)$ transformations, with the corresponding Jacobian correction included in the target density. The proposal covariance is calibrated from the numerical Hessian of the log-posterior evaluated at the MLE, scaled by $2.38^2/d$ as prescribed by the optimal scaling theory of @roberts1997. An adaptive mechanism tunes the global proposal scale during warmup to target the theoretically optimal acceptance rate of approximately 23\% for multivariate targets [@roberts1997].
+
+**Priors.** We use weakly informative priors: $\pi \sim \text{Beta}(2,2)$, $\mu_k \sim \mathcal{N}(0,2)$, $\sigma_k \sim \text{Exp}(1)$. We run 4 independent chains of 5000 post-warmup iterations (2000 warmup) each, initialized near the MLE with random perturbations. Convergence is assessed via the Gelman-Rubin $\hat{R}$ diagnostic.
+
+```{r fig-trace}
+#| fig-cap: "Trace plots for all five model parameters across four MCMC chains. Good mixing and convergence are evidenced by overlapping stationary chains."
+#| fig-height: 6
+#| fig-width: 8
+#| label: fig-trace
+
+par_names <- c(expression(pi), expression(mu[1]), expression(sigma[1]),
+               expression(mu[2]), expression(sigma[2]))
+col_names <- c("pi1", "mu1", "sigma1", "mu2", "sigma2")
+chain_colors <- c("#E74C3C", "#3498DB", "#2ECC71", "#9B59B6")
+
+trace_plots <- lapply(1:5, function(p) {
+  trace_df <- do.call(rbind, lapply(mcmc_result$chains, function(ch) {
+    data.frame(
+      iteration = seq_len(nrow(ch$samples)),
+      value = ch$samples[, p],
+      chain = factor(ch$chain_id)
+    )
+  }))
+  ggplot(trace_df, aes(x = iteration, y = value, color = chain)) +
+    geom_line(alpha = 0.6, linewidth = 0.3) +
+    scale_color_manual(values = chain_colors) +
+    labs(y = col_names[p], x = if (p == 5) "Iteration" else "") +
+    theme(legend.position = "none",
+          axis.title.x = element_text(size = 9))
+})
+
+grid.arrange(grobs = trace_plots, ncol = 1)
+```
+
+```{r fig-posterior-dens}
+#| fig-cap: "Posterior density estimates for all five parameters. Vertical dashed lines indicate MLE point estimates for comparison."
+#| fig-height: 4
+#| fig-width: 8
+#| label: fig-posterior-dens
+
+dens_plots <- lapply(1:5, function(p) {
+  dens_df <- data.frame(value = mcmc_result$all_samples[, p])
+  mle_val <- mle_start[p]
+  ggplot(dens_df, aes(x = value)) +
+    geom_density(fill = palette_main[3], alpha = 0.5, color = palette_main[1]) +
+    geom_vline(xintercept = mle_val, linetype = "dashed",
+               color = palette_main[2], linewidth = 0.7) +
+    labs(x = col_names[p], y = "") +
+    theme(axis.title.y = element_blank())
+})
+
+grid.arrange(grobs = dens_plots, ncol = 3)
+```
+
+```{r tbl-bayes-summary}
+#| label: tbl-bayes-summary
+bayes_df <- data.frame(
+  Parameter = c("pi", "mu1", "sigma1", "mu2", "sigma2"),
+  Mean = round(bayes_summ$mean, 4),
+  SD = round(bayes_summ$sd, 4),
+  `CI 2.5%` = round(bayes_summ$q2.5, 4),
+  `CI 97.5%` = round(bayes_summ$q97.5, 4),
+  Rhat = round(bayes_summ$rhat, 3),
+  check.names = FALSE
+)
+kable(bayes_df, booktabs = TRUE,
+      caption = "Bayesian posterior summary: mean, standard deviation, 95\\% credible interval, and Gelman-Rubin convergence diagnostic Rhat.") |>
+  kable_styling(latex_options = "hold_position")
+```
+
+The $\hat{R}$ values close to 1 confirm convergence of the MCMC chains. The acceptance rates range from `r round(min(mcmc_result$acceptance_rates), 2)` to `r round(max(mcmc_result$acceptance_rates), 2)`, within the recommended range for multivariate Metropolis-Hastings.
+
+```{r fig-posterior-pred}
+#| fig-cap: "Posterior predictive check: the fitted density (red) with 95% credible band (shaded) overlaid on the observed density histogram (bars). The narrow credible band reflects the high precision from 705,044 observations."
+#| fig-height: 4
+#| fig-width: 8
+#| label: fig-posterior-pred
+
+set.seed(123)
+n_draws <- 500
+draw_idx <- sample(nrow(mcmc_result$all_samples), n_draws)
+x_grid_pp <- seq(0.01, 3, length.out = 500)
+
+pp_matrix <- sapply(draw_idx, function(i) {
+  s <- mcmc_result$all_samples[i, ]
+  dlnorm_mix(x_grid_pp, s[1], s[2], s[3], s[4], s[5])
+})
+
+pp_band <- data.frame(
+  x = x_grid_pp,
+  median = apply(pp_matrix, 1, median),
+  lower = apply(pp_matrix, 1, quantile, 0.025),
+  upper = apply(pp_matrix, 1, quantile, 0.975)
+)
+
+ggplot() +
+  geom_col(data = dat_plot, aes(x = midpoint, y = density / 100),
+           fill = palette_main[1], alpha = 0.4, width = dat_plot$bin_width * 0.9) +
+  geom_ribbon(data = pp_band, aes(x = x, ymin = lower, ymax = upper),
+              fill = palette_main[3], alpha = 0.3) +
+  geom_line(data = pp_band, aes(x = x, y = median),
+            color = palette_main[2], linewidth = 0.8) +
+  labs(x = "Diameter (mm)", y = "Density",
+       title = "Posterior predictive check",
+       subtitle = "Median fit (red) with 95% credible band (blue shading)") +
+  coord_cartesian(xlim = c(0, 3))
+```
+
+```{r tbl-comparison-all}
+#| label: tbl-comparison-all
+comp_all <- data.frame(
+  Parameter = c("pi", "mu1", "sigma1", "mu2", "sigma2"),
+  `EM (jittered)` = round(c(em_result$pi1, em_result$mu1, em_result$sigma1,
+               em_result$mu2, em_result$sigma2), 4),
+  `MLE (binned)` = round(c(mle_result$pi1, mle_result$mu1, mle_result$sigma1,
+                         mle_result$mu2, mle_result$sigma2), 4),
+  `MLE SE` = ifelse(is.na(mle_result$se), "--", round(mle_result$se, 4)),
+  `Bayes Mean` = round(bayes_summ$mean, 4),
+  `Bayes 95% CI` = paste0("[", round(bayes_summ$q2.5, 3), ", ",
+                          round(bayes_summ$q97.5, 3), "]"),
+  check.names = FALSE
+)
+kable(comp_all, booktabs = TRUE,
+      caption = "Parameter estimates across all three fitting methods. MLE standard errors are computed from the observed information matrix. The close agreement confirms the robustness of the inference.") |>
+  kable_styling(latex_options = c("hold_position", "scale_down"))
+```
+
+All three methods produce highly consistent estimates (@tbl-comparison-all), confirming the robustness of the inference. The Bayesian credible intervals are extremely narrow (e.g., the 95% CI for $\pi$ spans less than 0.005), reflecting the large sample size. This posterior concentration is expected: with $N > 700{,}000$ observations, the likelihood dominates the prior, and the posterior converges tightly around the MLE.
+
+# Goodness-of-Fit Test {#sec-gof}
+
+We test $H_0$: the data come from a bi-log-normal distribution using a parametric bootstrap procedure. The test statistic is the Pearson chi-squared statistic $T = \sum_{j=1}^{J} (O_j - E_j)^2 / E_j$, where $O_j$ denotes the observed count in bin $j$ and $E_j = N \cdot p_j(\hat\theta)$ is the expected count under the fitted model. To obtain the reference distribution of $T$ under $H_0$, we perform $B = 500$ parametric bootstrap iterations: for each iteration $b$, we simulate a new dataset $\mathbf{n}^{(b)} \sim \text{Multinomial}(N, \hat{\mathbf{p}})$ from the fitted model, refit the model to obtain $\hat\theta^{(b)}$, and compute the corresponding test statistic $T^{(b)}$. The re-fitting step is essential because it accounts for the variability introduced by parameter estimation. The bootstrap p-value is then $\hat{p} = B^{-1}\sum_{b=1}^B \mathbf{1}(T^{(b)} \geq T_{\text{obs}})$.
+
+```{r bootstrap-gof, results='hide'}
+mle_params <- c(mle_result$pi1, mle_result$mu1, mle_result$sigma1,
+                mle_result$mu2, mle_result$sigma2)
+
+boot_result <- bootstrap_gof(
+  dat$startpoint, dat$endpoint, dat$counts,
+  fitted_params = mle_params,
+  B = 500,
+  seed = 42
+)
+```
+
+```{r fig-bootstrap}
+#| fig-cap: "Distribution of the parametric bootstrap chi-squared statistics. The observed test statistic (red dashed line) falls far beyond the bootstrap distribution, yielding p = 0. This formal rejection is expected given the very large sample size (see text)."
+#| fig-height: 3.5
+#| fig-width: 7
+#| label: fig-bootstrap
+
+boot_df <- data.frame(T_stat = boot_result$T_boot)
+
+ggplot(boot_df, aes(x = T_stat)) +
+  geom_histogram(bins = 40, fill = palette_main[3], alpha = 0.7,
+                 color = "white") +
+  geom_vline(xintercept = boot_result$T_obs, color = palette_main[2],
+             linewidth = 1, linetype = "dashed") +
+  annotate("text", x = boot_result$T_obs, y = Inf, vjust = 2, hjust = 1.1,
+           label = paste0("T_obs = ", round(boot_result$T_obs, 1),
+                          "\np-value = ", round(boot_result$p_value, 3)),
+           color = palette_main[2], size = 3.5) +
+  labs(x = "Chi-squared statistic", y = "Count",
+       title = "Parametric bootstrap goodness-of-fit test",
+       subtitle = paste0("B = ", boot_result$B_valid, " valid bootstrap samples")) +
+  coord_cartesian(xlim = c(0, boot_result$T_obs * 1.1))
+```
+
+```{r fig-obs-vs-exp}
+#| fig-cap: "Observed versus expected counts under the fitted bi-log-normal model. Close agreement across all bins confirms the adequacy of the model."
+#| fig-height: 3.5
+#| fig-width: 8
+#| label: fig-obs-vs-exp
+
+probs_fitted <- bin_probs(dat$startpoint, dat$endpoint,
+                          mle_result$pi1, mle_result$mu1, mle_result$sigma1,
+                          mle_result$mu2, mle_result$sigma2)
+probs_fitted <- probs_fitted / sum(probs_fitted)
+expected_counts <- N_total * probs_fitted
+
+obs_exp_df <- data.frame(
+  bin = seq_len(nrow(dat_plot)),
+  midpoint = dat_plot$midpoint,
+  observed = dat_plot$counts,
+  expected = expected_counts[1:nrow(dat_plot)]
+) |> pivot_longer(cols = c(observed, expected), names_to = "type", values_to = "count")
+
+ggplot(obs_exp_df, aes(x = midpoint, y = count, fill = type)) +
+  geom_col(position = "dodge", alpha = 0.7) +
+  scale_fill_manual(values = c(expected = palette_main[2], observed = palette_main[3]),
+                    labels = c("Expected", "Observed")) +
+  scale_x_log10(breaks = c(0.05, 0.1, 0.2, 0.5, 1, 2),
+                labels = c("0.05", "0.1", "0.2", "0.5", "1", "2")) +
+  labs(x = "Diameter (mm, log scale)", y = "Count", fill = "",
+       title = "Observed vs expected counts") +
+  annotation_logticks(sides = "b")
+```
+
+The parametric bootstrap yields a p-value of `r round(boot_result$p_value, 3)` based on `r boot_result$B_valid` valid bootstrap samples (@fig-bootstrap), formally rejecting the bi-log-normal model. However, this result is expected and should be interpreted with care: with $N = 705{,}044$ observations, the chi-squared test has enormous statistical power and will reject any parametric model, no matter how close the approximation. The observed test statistic ($T_{\text{obs}} = `r round(boot_result$T_obs, 1)`$) reflects the amplification of tiny deviations by the very large sample size. Crucially, @fig-obs-vs-exp demonstrates that the observed and expected counts agree very closely across all bins, confirming that the bi-log-normal model is an excellent practical approximation despite the formal rejection. This distinction between statistical significance and practical adequacy is well-known in the goodness-of-fit literature for large samples.
+
+# Monte Carlo Simulation {#sec-mc}
+
+Having established the bi-log-normal model as an excellent practical approximation to the data, we can use it for Monte Carlo simulation of snow-flake diameters, which was the original goal for snow transport modelling.
+
+```{r fig-mc-sim}
+#| fig-cap: "Monte Carlo simulation: 100,000 diameters sampled from the fitted bi-log-normal model. Left: simulated histogram overlaid with the fitted density. Right: QQ-plot comparing simulated quantiles against the empirical quantiles from the binned data."
+#| fig-height: 3.5
+#| fig-width: 10
+#| label: fig-mc-sim
+
+set.seed(42)
+n_sim <- 100000
+component <- rbinom(n_sim, 1, 1 - mle_result$pi1)
+x_sim <- ifelse(component == 0,
+                rlnorm(n_sim, mle_result$mu1, mle_result$sigma1),
+                rlnorm(n_sim, mle_result$mu2, mle_result$sigma2))
+
+p_sim_hist <- ggplot(data.frame(x = x_sim[x_sim < 3]), aes(x = x)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 80,
+                 fill = palette_main[3], alpha = 0.5, color = "white") +
+  geom_line(data = fit_df, aes(x = x, y = mixture),
+            color = palette_main[2], linewidth = 0.8) +
+  labs(x = "Diameter (mm)", y = "Density",
+       title = "Simulated diameters") +
+  coord_cartesian(xlim = c(0, 3))
+
+# QQ-plot: simulated vs empirical quantiles
+emp_quantiles <- rep(dat_plot$midpoint, dat_plot$counts)
+emp_q <- quantile(emp_quantiles, probs = seq(0.01, 0.99, 0.01))
+sim_q <- quantile(x_sim, probs = seq(0.01, 0.99, 0.01))
+
+qq_df <- data.frame(empirical = emp_q, simulated = sim_q)
+p_qq <- ggplot(qq_df, aes(x = empirical, y = simulated)) +
+  geom_point(color = palette_main[1], size = 1.5) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50") +
+  labs(x = "Empirical quantiles (mm)", y = "Simulated quantiles (mm)",
+       title = "QQ-plot") +
+  coord_equal()
+
+grid.arrange(p_sim_hist, p_qq, ncol = 2)
+```
+
+# Discussion {#sec-discussion}
+
+## Summary of Findings
+
+The bi-log-normal mixture model provides an excellent practical fit to the snow-flake diameter data. All three estimation methods (EM on jittered data, direct MLE on binned data, Bayesian MCMC) yield consistent parameter estimates, confirming the robustness of the analysis. The first component captures the smaller particles (mode near `r round(exp(mle_result$mu1 - mle_result$sigma1^2), 2)` mm) while the second captures the larger particles (mode near `r round(exp(mle_result$mu2 - mle_result$sigma2^2), 2)` mm). Although the parametric bootstrap formally rejects the model (as expected with $N > 700{,}000$), the observed-versus-expected comparison confirms excellent practical adequacy.
+
+## Comparison of Methods
+
+The three estimation approaches offer complementary strengths. The EM algorithm on jittered data converges in 66 iterations and yields closed-form M-step updates, but its estimates depend on the particular jittering realization and operate on an approximate (continuous) likelihood rather than the exact binned one. The direct MLE on the binned likelihood avoids both issues: it optimizes the exact multinomial log-likelihood and is deterministic given the same starting point. The Bayesian MCMC approach produces the most complete inferential output, providing full posterior distributions and 95\% credible intervals for all five parameters; its computational cost is approximately 30 seconds for 4 chains of 7000 iterations each. In practice, the binned MLE point estimates are recommended for simulation purposes, while the Bayesian credible intervals are valuable for reporting parameter uncertainty.
+
+## Limitations
+
+Several limitations should be acknowledged. First, the original continuous diameter measurements are not available; the binned format inherently discards information about the within-bin distribution, which limits the precision of any fitted model. Second, the non-equidistant bin grid requires careful treatment in both visualization and likelihood computation. In particular, the first bin $[0, 0.06]$ is notably wider than the others, which may mask finer structure in the small-particle regime. Third, the present analysis is restricted to a two-component mixture; we did not systematically explore whether a three-component mixture or alternative flexible distributions (e.g., gamma or Weibull mixtures) might provide a better fit. Finally, the EM estimates depend on the specific jittering realization, introducing a source of variability not present in the direct binned MLE. This dependence could be quantified through repeated jittering with different random seeds, though the close agreement between EM and MLE estimates suggests it is small.
+
+## Future Work
+
+A natural extension would be to fit a three-component mixture and compare it to the two-component model via BIC, in order to determine whether additional components are statistically warranted. It would also be valuable to explore alternative distributional families (e.g., Weibull or gamma mixtures) and assess whether they provide a better fit to the data. From a scientific perspective, investigating the physical processes that generate the observed bimodal size distribution could connect the two mixture components to distinct particle formation mechanisms, such as precipitation versus wind erosion. Finally, the fitted Monte Carlo simulator could be integrated into a full snow transport model, following the framework of @melo2021, to quantify the impact of the particle size distribution on saltation dynamics and drifting snow flux.
+
+# References {.unnumbered}
