@@ -11,6 +11,7 @@ Fitting a mixture of two log-normal distributions to binned snow-flake diameter 
 ### Requirements
 - R >= 4.4
 - Quarto >= 1.4
+- LaTeX distribution (for PDF output). If not installed, run `quarto install tinytex` to install TinyTeX automatically.
 
 ### R Packages
 ```r
