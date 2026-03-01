@@ -572,4 +572,8 @@ Several limitations should be acknowledged. First, the original continuous diame
 
 A natural extension would be to fit a three-component mixture and compare it to the two-component model via BIC, in order to determine whether additional components are statistically warranted. It would also be valuable to explore alternative distributional families (e.g., Weibull or gamma mixtures) and assess whether they provide a better fit to the data. From a scientific perspective, investigating the physical processes that generate the observed bimodal size distribution could connect the two mixture components to distinct particle formation mechanisms, such as precipitation versus wind erosion. Finally, the fitted Monte Carlo simulator could be integrated into a full snow transport model, following the framework of @melo2021, to quantify the impact of the particle size distribution on saltation dynamics and drifting snow flux.
 
+# Acknowledgments {.unnumbered}
+
+Claude (Anthropic) was used to assist with some parts of the code implementation. All AI-generated code was reviewed, modified, and integrated by the author; the analysis, methodological choices, and interpretation of results are entirely my own.
+
 # References {.unnumbered}
